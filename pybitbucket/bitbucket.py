@@ -40,14 +40,7 @@ class BbOauth2:
         else:
             self.access_token = None
 
-        # Response looks like this:
-        # {"scopes": "pipeline runner pullrequest team project account issue snippet",
-        # "access_token": "3N7udm1K-OASRIOz1XZnKowWiQjyvvkzz0ELJxooOHK26jP2RPEGSj-kWtK1t1EMtme0zGTpUQrsz-U1TKYFBzzgC8AU49PKUH-98C7jr_W2WOp7eOFJIMhL",
-        # "expires_in": 7200,
-        # "token_type": "bearer",
-        # "state": "client_credentials",
-        # "refresh_token": "bqh4vsh8xCtaELGwwD"}
-        print(response.text)
+        # print(response.text)
         return self.access_token
 
     def refresh_access_token(self):
@@ -90,23 +83,6 @@ class Bitbucket():
         self.get_workspace()
         self.get_projects()
         # self.get_repos()
-
-    def get_pull_requests(self):
-        url = "https://api.bitbucket.org/2.0/repositories/{workspace}/{repo_slug}/pullrequests".format(
-            workspace="xpanseinc", repo_slug=123)
-
-        headers = {
-            "Accept": "application/json",
-            "Authorization": "Bearer <access_token>"
-        }
-
-        response = requests.request(
-            "GET",
-            url,
-            headers=headers
-        )
-
-        print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
 
     def get_repos(self):
         if self.workspace is not None:
