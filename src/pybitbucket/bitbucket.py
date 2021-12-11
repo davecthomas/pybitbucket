@@ -72,11 +72,16 @@ class Bitbucket():
         self.projects_dict = {}
         self.projects = None
         self.workspace = None
+        secret_config = configparser.RawConfigParser()
+        secret_config.read(settings["secret-properties"])
+        self.workspace_id = secret_config["atlassian"]["workspace_id"]
+        self.project_key = secret_config["atlassian"]["project_key"]
+        self.settings = secret_config["atlassian_oauth"]
         config = configparser.RawConfigParser()
         config.read(settings["properties"])
-        self.workspace_id = config["atlassian"]["workspace_id"]
-        self.project_key = config["atlassian"]["project_key"]
-        self.settings = config["atlassian_oauth"]
+        self.version = config["general"]["version"]
+        print(f"Bitbucket version {self.version}")
+        self.workspace_id = secret_config["atlassian"]["workspace_id"]
         self.oauth2 = BbOauth2(self.settings)
         self.access_token = self.oauth2.get_access_token()
         # Initialize the workspace and grab all projects therein

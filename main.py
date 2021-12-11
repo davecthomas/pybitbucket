@@ -1,8 +1,8 @@
-from pybitbucket.bitbucket import Bitbucket
+from src.pybitbucket.bitbucket import Bitbucket
 
 config = {
-    "version": 1.0,
-    "properties": "secretproperties.properties"}
-print(f'pybitbucket ', {config["version"]})
+    "secret-properties": "secretproperties.properties",
+    "properties": "properties.properties"}
+
 bb = Bitbucket(settings=config)
 
