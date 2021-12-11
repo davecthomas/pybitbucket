@@ -9,3 +9,6 @@ A python interface to Atlassian Bitbucket API. Uses the OAuth grant type of clie
 5. Copy the workplace UUID into the [atlassian] section
 6. Run the project
 
+## Pull Requests
+If there is a default project key set, a list of pull requests will be retrieved only for this project.
+

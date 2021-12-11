@@ -75,7 +75,10 @@ class Bitbucket():
         secret_config = configparser.RawConfigParser()
         secret_config.read(settings["secret-properties"])
         self.workspace_id = secret_config["atlassian"]["workspace_id"]
-        self.project_key = secret_config["atlassian"]["project_key"]
+        if "default_project_key" in secret_config["atlassian"]:
+            self.default_project_key = secret_config["atlassian"]["default_project_key"]
+        else:
+            self.default_project_key = None
         self.settings = secret_config["atlassian_oauth"]
         config = configparser.RawConfigParser()
         config.read(settings["properties"])
@@ -87,7 +90,6 @@ class Bitbucket():
         # Initialize the workspace and grab all projects therein
         self.get_workspace()
         self.get_projects()
-        # self.get_repos()
 
     def get_repos(self):
         if self.workspace is not None:
@@ -133,10 +135,16 @@ class Bitbucket():
                         projects_list = []
 
                     for project in projects_list:
-                        new_project = Project(self.workspace, project, self.access_token)
+                        new_project = Project(self.workspace, project)
                         self.projects_dict[new_project.key] = new_project
-                        # repos_list = new_project.repos_url
-                        # print(f"Project {new_project.name}")
+
+                    if self.default_project_key is not None:
+                        print(f"Default project {self.default_project_key}")
+                        if self.default_project_key in self.projects_dict:
+                            print(f"Default project found {self.projects_dict[self.default_project_key].name}")
+                            # Get the list of repos for the default project
+                            repos_dict = self.projects_dict[self.default_project_key].get_repos()
+                            print(f"default project repos {repos_dict}")
 
             # print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
         else:
@@ -157,18 +165,19 @@ class Bitbucket():
         )
         if response:
             if response.status_code == 200:
-                self.workspace = Workspace(response.json())
+                self.workspace = Workspace(response.json(), self.access_token)
 
-        print("get workspace {name}".format(name=self.workspace.name))
+        print(f"get workspace {self.workspace.name}")
 
 
 class Workspace:
-    def __init__(self, workspace_dict):
+    def __init__(self, workspace_dict, access_token):
         try:
             self.dict_urls = workspace_dict["links"]
             self.slug = workspace_dict["slug"]
             self.name = workspace_dict["name"]
             self.uuid = workspace_dict["uuid"]
+            self.access_token = access_token
         except (IndexError, KeyError, TypeError):
             self.dict_urls = None
             self.slug = None
@@ -177,10 +186,11 @@ class Workspace:
 
 
 class Project:
-    def __init__(self, workspace, project_dict, access_token):
-        print(f"Project {project_dict}")
+    def __init__(self, workspace, project_dict):
+        # print(f"Project {project_dict}")
         self.workspace = workspace
         self.repos = None
+        self.repos_dict = {}
 
         try:
             self.key = project_dict["key"]
@@ -189,7 +199,7 @@ class Project:
             self.name = project_dict["name"]
             self.uuid = project_dict["uuid"]
             self.repos_url = project_dict["links"]["repositories"]["href"]
-            print("Project {name} repo url {url}".format(name=self.name, url=self.repos_url))
+            # print("Project {name} repo url {url}".format(name=self.name, url=self.repos_url))
             self.avatar_url = project_dict["links"]["avatar"]["href"]
         except (IndexError, KeyError, TypeError):
             self.key = None
@@ -204,10 +214,10 @@ class Project:
             repos_url = self.repos_url
             has_more_pages = True
             while has_more_pages:
-                print("get repos {repos_url}".format(repos_url=repos_url))
+                # print("get repos {repos_url}".format(repos_url=repos_url))
                 headers = {
                     "Accept": "application/json",
-                    "Authorization": "Bearer {access_token}".format(access_token=access_token)
+                    "Authorization": "Bearer {access_token}".format(access_token=self.workspace.access_token)
                 }
 
                 response = requests.request(
@@ -227,19 +237,22 @@ class Project:
 
                         for repo in repos_list:
                             new_repo = Repository(self.workspace, repo)
+                            self.repos_dict[new_repo.name] = new_repo
 
                         if "next" not in self.repos:
                             has_more_pages = False
                         else:
                             repos_url = self.repos["next"]
 
-                    # TO DO: Handle pagination
-
             # print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
+
+    def get_repos(self):
+        return self.repos_dict
 
 
 class Repository:
     def __init__(self, workspace, repo_dict):
+        pull_request_state = "MERGED"
         self.workspace = workspace
         # print(f"Repository {repo_dict}")
         try:
@@ -250,7 +263,8 @@ class Repository:
             self.uuid = repo_dict["uuid"]
             self.avatar_url = repo_dict["links"]["avatar"]["href"]
             self.url = repo_dict["links"]["self"]["href"]
-            print(f"Repository {self.name}")
+            self.slug = repo_dict["slug"]
+            # print(f"Repository {self.name}")
         except (IndexError, KeyError, TypeError):
             self.links = None
             self.description = None
@@ -259,4 +273,28 @@ class Repository:
             self.uuid = None
             self.avatar_url = None
             self.url = None
+            self.slug = None
 
+    def get_pull_requests(self, state="MERGED"):
+        url = f"https://api.bitbucket.org/2.0/repositories/{self.workspace.slug}/{{{self.uuid}}}/pullrequests"
+        print(f"pull_requests {self.name} url={url}")
+
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.workspace.access_token}"
+        }
+
+        response = requests.request(
+            "GET",
+            url,
+            headers=headers
+        )
+
+        print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
+
+
+class PullRequest:
+    def __init__(self, workspace, project, repo):
+        self.workspace = workspace
+        self.project = project
+        self.repo = repo
