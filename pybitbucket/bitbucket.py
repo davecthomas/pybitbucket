@@ -69,7 +69,7 @@ class BbOauth2:
 
 class Bitbucket():
     def __init__(self, settings):
-        self.projects_list = []
+        self.projects_dict = {}
         self.projects = None
         self.workspace = None
         config = configparser.RawConfigParser()
@@ -128,8 +128,8 @@ class Bitbucket():
                         projects_list = []
 
                     for project in projects_list:
-                        new_project = Project(project, self.access_token)
-                        self.projects_list.append(new_project)
+                        new_project = Project(self.workspace, project, self.access_token)
+                        self.projects_dict[new_project.key] = new_project
                         # repos_list = new_project.repos_url
                         # print(f"Project {new_project.name}")
 
@@ -172,8 +172,11 @@ class Workspace:
 
 
 class Project:
-    def __init__(self, project_dict, access_token):
+    def __init__(self, workspace, project_dict, access_token):
         print(f"Project {project_dict}")
+        self.workspace = workspace
+        self.repos = None
+
         try:
             self.key = project_dict["key"]
             self.links = project_dict["links"]
@@ -193,38 +196,62 @@ class Project:
             self.repos_url = None
 
         if self.repos_url is not None:
-            print("get repo {repos_url}".format(repos_url=self.repos_url))
-            headers = {
-                "Accept": "application/json",
-                "Authorization": "Bearer {access_token}".format(access_token=access_token)
-            }
+            repos_url = self.repos_url
+            has_more_pages = True
+            while has_more_pages:
+                print("get repos {repos_url}".format(repos_url=repos_url))
+                headers = {
+                    "Accept": "application/json",
+                    "Authorization": "Bearer {access_token}".format(access_token=access_token)
+                }
 
-            response = requests.request(
-                "GET",
-                self.repos_url,
-                headers=headers
-            )
-            if response:
-                if response.status_code == 200:
-                    self.repo = Repository(response.json())
+                response = requests.request(
+                    "GET",
+                    repos_url,
+                    headers=headers
+                )
+                if response:
+                    if response.status_code == 200:
+                        self.repos = response.json()
+
+                        try:
+                            repos_list = self.repos["values"]
+
+                        except (IndexError, KeyError, TypeError):
+                            repos_list = []
+
+                        for repo in repos_list:
+                            new_repo = Repository(self.workspace, repo)
+
+                        if "next" not in self.repos:
+                            has_more_pages = False
+                        else:
+                            repos_url = self.repos["next"]
+
+                    # TO DO: Handle pagination
 
             # print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
 
 
 class Repository:
-    def __init__(self, repo_dict):
-        print(f"Project {repo_dict}")
-        # try:
-        #     self.key = repo_dict["key"]
-        #     self.links = repo_dict["links"]
-        #     self.description = repo_dict["description"]
-        #     self.name = repo_dict["name"]
-        #     self.uuid = repo_dict["uuid"]
-        #     self.avatar_url = repo_dict["links"]["avatar"]["href"]
-        # except (IndexError, KeyError, TypeError):
-        #     self.key = None
-        #     self.links = None
-        #     self.description = None
-        #     self.name = None
-        #     self.uuid = None
-        #     self.avatar_url = None
+    def __init__(self, workspace, repo_dict):
+        self.workspace = workspace
+        # print(f"Repository {repo_dict}")
+        try:
+            self.links = repo_dict["links"]
+            self.description = repo_dict["description"]
+            self.name = repo_dict["name"]
+            self.full_name = repo_dict["full_name"]
+            self.uuid = repo_dict["uuid"]
+            self.avatar_url = repo_dict["links"]["avatar"]["href"]
+            self.url = repo_dict["links"]["self"]["href"]
+            print(f"Repository {self.name}")
+        except (IndexError, KeyError, TypeError):
+            self.links = None
+            self.description = None
+            self.name = None
+            self.full_name = None
+            self.uuid = None
+            self.avatar_url = None
+            self.url = None
+
