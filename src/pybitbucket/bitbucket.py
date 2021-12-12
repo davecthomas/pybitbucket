@@ -1,4 +1,6 @@
 import configparser
+from datetime import datetime
+
 import requests
 import json
 
@@ -32,9 +34,11 @@ class BbOauth2:
                     data = response.json()
                     self.access_token = data["access_token"]
                     self.refresh_token = data["refresh_token"]
-                except (IndexError, KeyError, TypeError):
+                except (IndexError, KeyError, TypeError) as e:
+                    print(f"Exception {e}")
                     self.access_token = None
                     self.refresh_token = None
+
             elif response.status_code == 401:
                 self.access_token = self.refresh_access_token()
         else:
@@ -57,7 +61,8 @@ class BbOauth2:
                     data = response.json()
                     self.access_token = data["access_token"]
                     self.refresh_token = data["refresh_token"]
-                except (IndexError, KeyError, TypeError):
+                except (IndexError, KeyError, TypeError) as e:
+                    print(f"Exception {e}")
                     self.access_token = None
                     self.refresh_token = None
         else:
@@ -67,7 +72,7 @@ class BbOauth2:
         return self.access_token
 
 
-class Bitbucket():
+class Bitbucket:
     def __init__(self, settings):
         self.projects_dict = {}
         self.projects = None
@@ -91,24 +96,6 @@ class Bitbucket():
         self.get_workspace()
         self.get_projects()
 
-    def get_repos(self):
-        if self.workspace is not None:
-            url = self.workspace.dict_urls["repositories"]["href"]
-            print("get_repos: {url}".format(url=url))
-
-            headers = {
-                "Accept": "application/json",
-                "Authorization": "Bearer {access_token}".format(access_token=self.access_token)
-            }
-
-            response = requests.request(
-                "GET",
-                url,
-                headers=headers
-            )
-
-            print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
-
     def get_projects(self):
         if self.workspace is not None:
 
@@ -131,7 +118,8 @@ class Bitbucket():
                     try:
                         projects_list = self.projects["values"]
 
-                    except (IndexError, KeyError, TypeError):
+                    except (IndexError, KeyError, TypeError) as e:
+                        print(f"Exception {e}")
                         projects_list = []
 
                     for project in projects_list:
@@ -144,7 +132,9 @@ class Bitbucket():
                             print(f"Default project found {self.projects_dict[self.default_project_key].name}")
                             # Get the list of repos for the default project
                             repos_dict = self.projects_dict[self.default_project_key].get_repos()
-                            print(f"default project repos {repos_dict}")
+                            # print(f"default project repos {repos_dict}")
+                            for repo_name, repo in repos_dict.items():
+                                repo.get_pull_requests()
 
             # print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
         else:
@@ -172,17 +162,18 @@ class Bitbucket():
 
 class Workspace:
     def __init__(self, workspace_dict, access_token):
+        self.dict_urls = None
+        self.slug = None
+        self.name = None
+        self.uuid = None
         try:
             self.dict_urls = workspace_dict["links"]
             self.slug = workspace_dict["slug"]
             self.name = workspace_dict["name"]
             self.uuid = workspace_dict["uuid"]
             self.access_token = access_token
-        except (IndexError, KeyError, TypeError):
-            self.dict_urls = None
-            self.slug = None
-            self.name = None
-            self.uuid = None
+        except (IndexError, KeyError, TypeError) as e:
+            print(e)
 
 
 class Project:
@@ -191,6 +182,13 @@ class Project:
         self.workspace = workspace
         self.repos = None
         self.repos_dict = {}
+        self.key = None
+        self.links = None
+        self.description = None
+        self.name = None
+        self.uuid = None
+        self.avatar_url = None
+        self.repos_url = None
 
         try:
             self.key = project_dict["key"]
@@ -201,14 +199,8 @@ class Project:
             self.repos_url = project_dict["links"]["repositories"]["href"]
             # print("Project {name} repo url {url}".format(name=self.name, url=self.repos_url))
             self.avatar_url = project_dict["links"]["avatar"]["href"]
-        except (IndexError, KeyError, TypeError):
-            self.key = None
-            self.links = None
-            self.description = None
-            self.name = None
-            self.uuid = None
-            self.avatar_url = None
-            self.repos_url = None
+        except (IndexError, KeyError, TypeError) as e:
+            print(f"Exception {e}")
 
         if self.repos_url is not None:
             repos_url = self.repos_url
@@ -236,7 +228,7 @@ class Project:
                             repos_list = []
 
                         for repo in repos_list:
-                            new_repo = Repository(self.workspace, repo)
+                            new_repo = Repository(self.workspace, project=self, repo_dict=repo)
                             self.repos_dict[new_repo.name] = new_repo
 
                         if "next" not in self.repos:
@@ -251,9 +243,20 @@ class Project:
 
 
 class Repository:
-    def __init__(self, workspace, repo_dict):
+    def __init__(self, workspace, project, repo_dict):
         pull_request_state = "MERGED"
         self.workspace = workspace
+        self.pull_requests_list = []
+        self.project = project
+        self.repo_dict = repo_dict
+        self.links = None
+        self.description = None
+        self.name = None
+        self.full_name = None
+        self.uuid = None
+        self.avatar_url = None
+        self.url = None
+        self.slug = None
         # print(f"Repository {repo_dict}")
         try:
             self.links = repo_dict["links"]
@@ -264,37 +267,103 @@ class Repository:
             self.avatar_url = repo_dict["links"]["avatar"]["href"]
             self.url = repo_dict["links"]["self"]["href"]
             self.slug = repo_dict["slug"]
+
             # print(f"Repository {self.name}")
-        except (IndexError, KeyError, TypeError):
-            self.links = None
-            self.description = None
-            self.name = None
-            self.full_name = None
-            self.uuid = None
-            self.avatar_url = None
-            self.url = None
-            self.slug = None
+        except (IndexError, KeyError, TypeError) as e:
+            print(f"Exception {e}")
 
     def get_pull_requests(self, state="MERGED"):
-        url = f"https://api.bitbucket.org/2.0/repositories/{self.workspace.slug}/{{{self.uuid}}}/pullrequests"
-        print(f"pull_requests {self.name} url={url}")
+        url_query_parameter = f"?state={state}"
+        url = f"https://api.bitbucket.org/2.0/repositories/{self.workspace.slug}/{self.slug}/pullrequests" + url_query_parameter
+        # print(f"pull_requests {self.name} url={url}")
 
         headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self.workspace.access_token}"
         }
 
-        response = requests.request(
-            "GET",
-            url,
-            headers=headers
-        )
+        has_more_pages = True
+        pagenum = 0
+        while has_more_pages:
+            pagenum = pagenum + 1
+            print(f"get_pull_requests page {pagenum} url={url}")
+            response = requests.request(
+                "GET",
+                url,
+                headers=headers
+            )
+            if response and response.status_code == 200:
+                pr_response = response.json()
+                pr_list = []
 
+                try:
+                    pr_list = pr_response["values"]
+
+                except (IndexError, KeyError, TypeError):
+                    print(f"get_pull_requests has no values in returned json {pr_response}")
+
+                for pr_dict in pr_list:
+                    pr = PullRequest(self.workspace, project=self.project, repo=self, pr_dict=pr_dict)
+                    self.pull_requests_list.append(pr)
+                    print(f"pr {pr.title}")
+
+                    if pr.source_commit_url is not None:
+                        print(f"commit: {pr.source_commit_url}")
+
+                if "next" not in pr_response:
+                    has_more_pages = False
+                else:
+                    url = pr_response["next"]
         print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
 
 
 class PullRequest:
-    def __init__(self, workspace, project, repo):
+    def __init__(self, workspace, project, repo, pr_dict):
+        self.pr_dict = pr_dict
         self.workspace = workspace
         self.project = project
         self.repo = repo
+        self.title = None
+        self.id = None
+        self.created_on = None
+        self.description = None
+        self.source_branch = None
+        self.source_commit_hash = None
+        self.source_commit_url = None
+        self.destination_branch = None
+        self.destination_commit_hash = None
+        self.destination_commit_url = None
+        self.author = None
+        self.url = None
+        self.links = None
+        self.state = None
+        self.merge_commit = None
+        self.merge_commit_url = None
+
+        try:
+            if "title" in pr_dict:
+                self.title = pr_dict["title"]
+            self.id = pr_dict["id"]
+            self.created_on = pr_dict["created_on"]
+            if "updated_on" in pr_dict:
+                self.updated_on = pr_dict["updated_on"]
+            self.description = pr_dict["description"]
+            # self.date_time_obj = datetime.datetime.fromisoformat(self.created_on)
+            print(f"created on {self.created_on} ")
+            if "source" in pr_dict:
+                self.source_branch = pr_dict["source"]["branch"]["name"]
+                self.source_commit_hash = pr_dict["source"]["commit"]["hash"]
+                self.source_commit_url = pr_dict["source"]["commit"]["links"]["self"]["href"]
+            if "destination" in pr_dict:
+                self.destination_branch = pr_dict["destination"]["branch"]["name"]
+                self.destination_commit_hash = pr_dict["destination"]["commit"]["hash"]
+                self.destination_commit_url = pr_dict["destination"]["commit"]["links"]["self"]["href"]
+            self.author = pr_dict["author"]["display_name"]
+            self.url = pr_dict["links"]["self"]["href"]
+            self.links = pr_dict["links"]
+            self.state = pr_dict["state"]
+            if "merge_commit" in pr_dict:
+                self.merge_commit = pr_dict["merge_commit"]
+                self.merge_commit_url = pr_dict["merge_commit"]["links"]["self"]["href"]
+        except (IndexError, KeyError, TypeError) as e:
+            print(f"Exception {e}")
