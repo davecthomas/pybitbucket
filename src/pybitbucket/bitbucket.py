@@ -80,10 +80,6 @@ class Bitbucket:
         secret_config = configparser.RawConfigParser()
         secret_config.read(settings["secret-properties"])
         self.workspace_id = secret_config["atlassian"]["workspace_id"]
-        if "default_project_key" in secret_config["atlassian"]:
-            self.default_project_key = secret_config["atlassian"]["default_project_key"]
-        else:
-            self.default_project_key = None
         self.settings = secret_config["atlassian_oauth"]
         config = configparser.RawConfigParser()
         config.read(settings["properties"])
@@ -93,14 +89,40 @@ class Bitbucket:
         self.oauth2 = BbOauth2(self.settings)
         self.access_token = self.oauth2.get_access_token()
         # Initialize the workspace and grab all projects therein
-        self.get_workspace()
-        self.get_projects()
 
-    def get_projects(self):
+        if "default_deploy_repo" in secret_config["atlassian"]:
+            self.default_deploy_repo = secret_config["atlassian"]["default_deploy_repo"]
+        else:
+            self.default_deploy_repo = None
+        if "default_project_key" in secret_config["atlassian"]:
+            self.default_project_key = secret_config["atlassian"]["default_project_key"]
+        else:
+            self.default_project_key = None
+
+        self.workspace = self.get_workspace()
+
+        if self.default_project_key is not None:
+            print(f"Default project: {self.default_project_key} (getting PRs for all repos)")
+            project = self.workspace.get_project(self.default_project_key)
+            # Get the list of repos for the default project
+            repos_dict = project.get_repos()
+            # print(f"default project repos {repos_dict}")
+            for repo_name, repo in repos_dict.items():
+                if self.default_deploy_repo is not None and repo_name == self.default_deploy_repo:
+                    default_deploy_repo = True
+                else:
+                    default_deploy_repo = False
+                repo.get_pull_requests(default_deploy_repo=default_deploy_repo)
+        else:
+            self.workspace.get_projects()
+
+    def get_workspace(self):
+        workspace = None
+
         if self.workspace is not None:
-
-            url = self.workspace.dict_urls["projects"]["href"]
-            print("get_projects: {url}".format(url=url))
+            return self.workspace
+        else:
+            url = "https://api.bitbucket.org/2.0/workspaces/{{{workspace}}}".format(workspace=self.workspace_id)
 
             headers = {
                 "Accept": "application/json",
@@ -114,34 +136,59 @@ class Bitbucket:
             )
             if response:
                 if response.status_code == 200:
-                    self.projects = response.json()
-                    try:
-                        projects_list = self.projects["values"]
+                    workspace = Workspace(response.json(), self.access_token, self.default_project_key)
 
-                    except (IndexError, KeyError, TypeError) as e:
-                        print(f"Exception {e}")
-                        projects_list = []
+            print(f"get workspace {workspace.name}")
+            return workspace
 
-                    for project in projects_list:
-                        new_project = Project(self.workspace, project)
-                        self.projects_dict[new_project.key] = new_project
 
-                    if self.default_project_key is not None:
-                        print(f"Default project {self.default_project_key}")
-                        if self.default_project_key in self.projects_dict:
-                            print(f"Default project found {self.projects_dict[self.default_project_key].name}")
-                            # Get the list of repos for the default project
-                            repos_dict = self.projects_dict[self.default_project_key].get_repos()
-                            # print(f"default project repos {repos_dict}")
-                            for repo_name, repo in repos_dict.items():
-                                repo.get_pull_requests()
+class Workspace:
+    def __init__(self, workspace_dict, access_token, default_project_key=None):
+        self.access_token = access_token
+        self.default_project_key = default_project_key
+        self.dict_urls = None
+        self.slug = None
+        self.name = None
+        self.uuid = None
+        self.projects_dict = {}
+        try:
+            self.dict_urls = workspace_dict["links"]
+            self.slug = workspace_dict["slug"]
+            self.name = workspace_dict["name"]
+            self.uuid = workspace_dict["uuid"]
 
-            # print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
+        except (IndexError, KeyError, TypeError) as e:
+            print(e)
+
+    def get_project(self, key):
+        project = None
+        if key in self.projects_dict:
+            project = self.projects_dict[key]
         else:
-            print("No workspace")
+            url = f"https://api.bitbucket.org/2.0/workspaces/{self.slug}/projects/{key}"
+            print(f"get_project {key} url={url}")
 
-    def get_workspace(self):
-        url = "https://api.bitbucket.org/2.0/workspaces/{{{workspace}}}".format(workspace=self.workspace_id)
+            headers = {
+                "Accept": "application/json",
+                "Authorization": "Bearer {access_token}".format(access_token=self.access_token)
+            }
+
+            response = requests.request(
+                "GET",
+                url,
+                headers=headers
+            )
+            if response:
+                if response.status_code == 200:
+                    project_dict = response.json()
+                    project = Project(self, project_dict)
+
+            print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
+        return project
+
+    def get_projects(self):
+        url = self.dict_urls["projects"]["href"]
+        print("get_projects: {url}".format(url=url))
 
         headers = {
             "Accept": "application/json",
@@ -155,25 +202,21 @@ class Bitbucket:
         )
         if response:
             if response.status_code == 200:
-                self.workspace = Workspace(response.json(), self.access_token)
+                self.projects_dict = response.json()
+                try:
+                    projects_list = self.projects_dict["values"]
 
-        print(f"get workspace {self.workspace.name}")
+                except (IndexError, KeyError, TypeError) as e:
+                    print(f"Exception {e}")
+                    projects_list = []
 
+                for project in projects_list:
+                    new_project = Project(self, project)
+                    self.projects_dict[new_project.key] = new_project
 
-class Workspace:
-    def __init__(self, workspace_dict, access_token):
-        self.dict_urls = None
-        self.slug = None
-        self.name = None
-        self.uuid = None
-        try:
-            self.dict_urls = workspace_dict["links"]
-            self.slug = workspace_dict["slug"]
-            self.name = workspace_dict["name"]
-            self.uuid = workspace_dict["uuid"]
-            self.access_token = access_token
-        except (IndexError, KeyError, TypeError) as e:
-            print(e)
+        # print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
+        else:
+            print("No workspace")
 
 
 class Project:
@@ -272,7 +315,7 @@ class Repository:
         except (IndexError, KeyError, TypeError) as e:
             print(f"Exception {e}")
 
-    def get_pull_requests(self, state="MERGED"):
+    def get_pull_requests(self, default_deploy_repo=False, state="MERGED"):
         url_query_parameter = f"?state={state}"
         url = f"https://api.bitbucket.org/2.0/repositories/{self.workspace.slug}/{self.slug}/pullrequests" + url_query_parameter
         # print(f"pull_requests {self.name} url={url}")
@@ -286,7 +329,7 @@ class Repository:
         pagenum = 0
         while has_more_pages:
             pagenum = pagenum + 1
-            print(f"get_pull_requests page {pagenum} url={url}")
+            # print(f"get_pull_requests page {pagenum} url={url}")
             response = requests.request(
                 "GET",
                 url,
@@ -303,29 +346,32 @@ class Repository:
                     print(f"get_pull_requests has no values in returned json {pr_response}")
 
                 for pr_dict in pr_list:
-                    pr = PullRequest(self.workspace, project=self.project, repo=self, pr_dict=pr_dict)
+                    pr = PullRequest(self.workspace, project=self.project,
+                                     repo=self, pr_dict=pr_dict, default_deploy_repo=default_deploy_repo)
                     self.pull_requests_list.append(pr)
-                    print(f"pr {pr.title}")
+                    # print(f"pr {pr.title}")
 
-                    if pr.source_commit_url is not None:
-                        print(f"commit: {pr.source_commit_url}")
+                    # if pr.source_commit_url is not None:
+                    #     print(f"commit: {pr.source_commit_url}")
 
                 if "next" not in pr_response:
                     has_more_pages = False
                 else:
                     url = pr_response["next"]
-        print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
+        # print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
 
 
 class PullRequest:
-    def __init__(self, workspace, project, repo, pr_dict):
+    def __init__(self, workspace, project, repo, pr_dict, default_deploy_repo=False):
         self.pr_dict = pr_dict
         self.workspace = workspace
         self.project = project
         self.repo = repo
+        self.default_deploy_repo = default_deploy_repo
         self.title = None
         self.id = None
-        self.created_on = None
+        self.created_on_str = None
+        self.created_on_dt = None
         self.description = None
         self.source_branch = None
         self.source_commit_hash = None
@@ -339,17 +385,17 @@ class PullRequest:
         self.state = None
         self.merge_commit = None
         self.merge_commit_url = None
+        self.pr_commits_list = []
 
         try:
             if "title" in pr_dict:
                 self.title = pr_dict["title"]
             self.id = pr_dict["id"]
-            self.created_on = pr_dict["created_on"]
+            self.created_on_str = pr_dict["created_on"]
             if "updated_on" in pr_dict:
                 self.updated_on = pr_dict["updated_on"]
             self.description = pr_dict["description"]
-            # self.date_time_obj = datetime.datetime.fromisoformat(self.created_on)
-            print(f"created on {self.created_on} ")
+            self.created_on_dt = datetime.fromisoformat(self.created_on_str)
             if "source" in pr_dict:
                 self.source_branch = pr_dict["source"]["branch"]["name"]
                 self.source_commit_hash = pr_dict["source"]["commit"]["hash"]
@@ -361,9 +407,79 @@ class PullRequest:
             self.author = pr_dict["author"]["display_name"]
             self.url = pr_dict["links"]["self"]["href"]
             self.links = pr_dict["links"]
+            if default_deploy_repo:
+                print(f"default_deploy_repo: {self.description}")
+
+            # Get the commits related to the pull request
+            if "commits" in self.links:
+                self.commits_url = self.links["commits"]["href"]
+                self.list_commits = []
+                headers = {
+                    "Authorization": f"Bearer {self.workspace.access_token}"
+                }
+
+                url = self.commits_url
+                has_more_pages = True
+                pagenum = 0
+                while has_more_pages:
+                    pagenum = pagenum + 1
+                    print(f"get PR commits page {pagenum} url={url}")
+
+                    pr_commits_response = requests.request(
+                        "GET",
+                        self.commits_url,
+                        headers=headers
+                    )
+                    if pr_commits_response and pr_commits_response.status_code == 200:
+                        pr_commits_response = pr_commits_response.json()
+                        pr_commits_list = []
+                        print("PR commits:")
+                        # print(json.dumps(json.loads(pr_commits_response.text), sort_keys=True, indent=4, separators=(",", ": ")))
+
+                        try:
+                            pr_commits_list = pr_commits_response["values"]
+
+                        except (IndexError, KeyError, TypeError):
+                            print(f"get_pr_commits has no values in returned json {pr_commits_response}")
+
+                        for pr_commit_dict in pr_commits_list:
+                            commit = Commit(self.workspace, project=self.project,
+                                             pr=self, pr_commit_dict=pr_commit_dict)
+                            self.pr_commits_list.append(commit)
+                            # print(f"pr {pr.title}")
+
+                            # if pr.source_commit_url is not None:
+                            #     print(f"commit: {pr.source_commit_url}")
+
+                        if "next" not in pr_commits_response:
+                            has_more_pages = False
+                        else:
+                            url = pr_commits_response["next"]
+
             self.state = pr_dict["state"]
             if "merge_commit" in pr_dict:
                 self.merge_commit = pr_dict["merge_commit"]
                 self.merge_commit_url = pr_dict["merge_commit"]["links"]["self"]["href"]
+
         except (IndexError, KeyError, TypeError) as e:
             print(f"Exception {e}")
+
+class Commit:
+    def __init__(self, workspace, project, pr, pr_commit_dict):
+        self.workspace = workspace
+        self.project = project
+        self.pr = pr
+        self.pr_commit_dict = pr_commit_dict
+        self.date = None
+        self.message = None
+        self.hash = None
+
+        try:
+            self.date = pr_commit_dict["date"]
+            self.message = pr_commit_dict["message"]
+            self.hash = pr_commit_dict["hash"]
+            print(f"PR Commit {self.date} {self.message}")
+        except (IndexError, KeyError, TypeError) as e:
+            print(f"Exception {e}")
+            print(f"Commit: {self.pr_commit_dict}")
+
