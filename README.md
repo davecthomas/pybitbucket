@@ -12,7 +12,7 @@ A python interface to Atlassian Bitbucket API. Uses the OAuth grant type of clie
 ## Pull Requests
 1. If there is a default project key set, a list of pull requests will be retrieved for all repos for this project.
 2. If there is a default deploy project repo set, a list of pull requests will be retrieved for deployments.
-
+3. If require_jira_issue_id_in_commit_message is set to True, only commits with Jira issue IDs in the commit message are kept
 
 ## Tracking deployments
 If there is a default_deploy_repo value set in the [atlassian] section of the secretproperties file, it will look for 

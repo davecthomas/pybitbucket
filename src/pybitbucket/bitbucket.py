@@ -1,8 +1,12 @@
 import configparser
+import json
+from src.pybitbucket.jira import find_jira_id
 from datetime import datetime
+from urllib.parse import urlencode, quote_plus
+import numpy as np
+import pandas as pd
 
 import requests
-import json
 
 
 class BbOauth2Test:
@@ -72,8 +76,24 @@ class BbOauth2:
         return self.access_token
 
 
+class CommitList:
+    def __init__(self):
+        self.commit_list_dict = []  # This is a list of dictionaries of commits (for data framing)
+        self.commit_list = []  # This is a list of Commit objects
+        self.df = None
+
+    def add(self, commit):
+        self.commit_list.append(commit)
+        self.commit_list_dict.append(commit.to_dict())
+
+    def to_dataframe(self):
+        self.df = pd.DataFrame(self.commit_list_dict)
+        return self.df
+
+
 class Bitbucket:
     def __init__(self, settings):
+        self.settings_dict = {}
         self.projects_dict = {}
         self.projects = None
         self.workspace = None
@@ -99,6 +119,29 @@ class Bitbucket:
         else:
             self.default_project_key = None
 
+        if "get_prs_updated_since_utc" in secret_config["atlassian"]:
+            self.get_prs_updated_since_utc = secret_config["atlassian"]["get_prs_updated_since_utc"]
+            self.get_prs_updated_since_datetime = datetime.strptime(
+                self.get_prs_updated_since_utc, '%Y-%m-%dT%H:%M:%S%z')
+        else:
+            self.get_prs_updated_since_datetime = None
+
+        if "require_jira_issue_id_in_commit_message" in secret_config["atlassian"]:
+            self.require_jira_issue_id_in_commit_message = bool(
+                secret_config["atlassian"]["require_jira_issue_id_in_commit_message"])
+        else:
+            self.require_jira_issue_id_in_commit_message = False
+
+        self.settings_dict = {"version": self.version,
+                              "workspace_id": self.workspace_id,
+                              "default_deploy_repo": self.default_deploy_repo,
+                              "default_project_key": self.default_project_key,
+                              "get_prs_updated_since_utc": self.get_prs_updated_since_utc,
+                              "get_prs_updated_since_datetime": self.get_prs_updated_since_datetime,
+                              "require_jira_issue_id_in_commit_message": self.require_jira_issue_id_in_commit_message
+                              }
+        print(f"pybitbucket settings: {self.settings_dict}")
+
         self.workspace = self.get_workspace()
 
         if self.default_project_key is not None:
@@ -112,9 +155,13 @@ class Bitbucket:
                     default_deploy_repo = True
                 else:
                     default_deploy_repo = False
-                repo.get_pull_requests(default_deploy_repo=default_deploy_repo)
+                repo.get_pull_requests(default_deploy_repo=default_deploy_repo,
+                                       get_prs_updated_since_utc=self.get_prs_updated_since_utc,
+                                       require_jira_issue_id_in_commit_message=self.require_jira_issue_id_in_commit_message)
         else:
             self.workspace.get_projects()
+
+        print(f"Dataframe {self.workspace.commit_list.to_dataframe().to_csv()}")
 
     def get_workspace(self):
         workspace = None
@@ -144,6 +191,7 @@ class Bitbucket:
 
 class Workspace:
     def __init__(self, workspace_dict, access_token, default_project_key=None):
+        self.commit_list_df = None
         self.access_token = access_token
         self.default_project_key = default_project_key
         self.dict_urls = None
@@ -151,6 +199,8 @@ class Workspace:
         self.name = None
         self.uuid = None
         self.projects_dict = {}
+        self.commit_list = CommitList()
+
         try:
             self.dict_urls = workspace_dict["links"]
             self.slug = workspace_dict["slug"]
@@ -166,7 +216,7 @@ class Workspace:
             project = self.projects_dict[key]
         else:
             url = f"https://api.bitbucket.org/2.0/workspaces/{self.slug}/projects/{key}"
-            print(f"get_project {key} url={url}")
+            # print(f"get_project {key} url={url}")
 
             headers = {
                 "Accept": "application/json",
@@ -183,7 +233,7 @@ class Workspace:
                     project_dict = response.json()
                     project = Project(self, project_dict)
 
-            print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
+            # print(json.dumps(json.loads(response.text), sort_keys=True, indent=4, separators=(",", ": ")))
         return project
 
     def get_projects(self):
@@ -288,6 +338,7 @@ class Project:
 class Repository:
     def __init__(self, workspace, project, repo_dict):
         pull_request_state = "MERGED"
+        self.query_param_pr_sort_str = "-updated_on"  # sort PRs by last updated first
         self.workspace = workspace
         self.pull_requests_list = []
         self.project = project
@@ -315,8 +366,13 @@ class Repository:
         except (IndexError, KeyError, TypeError) as e:
             print(f"Exception {e}")
 
-    def get_pull_requests(self, default_deploy_repo=False, state="MERGED"):
-        url_query_parameter = f"?state={state}"
+    def get_pull_requests(self, default_deploy_repo=False, get_prs_updated_since_utc=None,
+                          require_jira_issue_id_in_commit_message=False, state="MERGED"):
+        url_query_parameter = f"?state={state}&sort={self.query_param_pr_sort_str}"
+        if get_prs_updated_since_utc is not None:
+            payload = {"q": f"updated_on>{get_prs_updated_since_utc}"}
+            get_prs_updated_since_utc_urlencoded = urlencode(payload, quote_via=quote_plus)
+            url_query_parameter = f"{url_query_parameter}&{get_prs_updated_since_utc_urlencoded}"
         url = f"https://api.bitbucket.org/2.0/repositories/{self.workspace.slug}/{self.slug}/pullrequests" + url_query_parameter
         # print(f"pull_requests {self.name} url={url}")
 
@@ -347,7 +403,8 @@ class Repository:
 
                 for pr_dict in pr_list:
                     pr = PullRequest(self.workspace, project=self.project,
-                                     repo=self, pr_dict=pr_dict, default_deploy_repo=default_deploy_repo)
+                                     repo=self, pr_dict=pr_dict, default_deploy_repo=default_deploy_repo,
+                                     require_jira_issue_id_in_commit_message=require_jira_issue_id_in_commit_message)
                     self.pull_requests_list.append(pr)
                     # print(f"pr {pr.title}")
 
@@ -362,7 +419,9 @@ class Repository:
 
 
 class PullRequest:
-    def __init__(self, workspace, project, repo, pr_dict, default_deploy_repo=False):
+    def __init__(self, workspace, project, repo, pr_dict, default_deploy_repo=False,
+                 require_jira_issue_id_in_commit_message=False):
+        self.query_param_pr_commits_sort_str = "-updated_on"  # sort PR commits by last updated first
         self.pr_dict = pr_dict
         self.workspace = workspace
         self.project = project
@@ -394,7 +453,8 @@ class PullRequest:
             self.created_on_str = pr_dict["created_on"]
             if "updated_on" in pr_dict:
                 self.updated_on = pr_dict["updated_on"]
-            self.description = pr_dict["description"]
+            if "description" in pr_dict:
+                self.description = pr_dict["description"]
             self.created_on_dt = datetime.fromisoformat(self.created_on_str)
             if "source" in pr_dict:
                 self.source_branch = pr_dict["source"]["branch"]["name"]
@@ -407,8 +467,8 @@ class PullRequest:
             self.author = pr_dict["author"]["display_name"]
             self.url = pr_dict["links"]["self"]["href"]
             self.links = pr_dict["links"]
-            if default_deploy_repo:
-                print(f"default_deploy_repo: {self.description}")
+            # if default_deploy_repo:
+            #     print(f"default_deploy_repo: {self.title} : {self.description}")
 
             # Get the commits related to the pull request
             if "commits" in self.links:
@@ -419,21 +479,22 @@ class PullRequest:
                 }
 
                 url = self.commits_url
+                url_query_parameter = f"?sort={self.query_param_pr_commits_sort_str}"
                 has_more_pages = True
                 pagenum = 0
                 while has_more_pages:
                     pagenum = pagenum + 1
-                    print(f"get PR commits page {pagenum} url={url}")
+                    # print(f"get PR commits page {pagenum} url={url}")
 
                     pr_commits_response = requests.request(
                         "GET",
-                        self.commits_url,
+                        url,
                         headers=headers
                     )
                     if pr_commits_response and pr_commits_response.status_code == 200:
                         pr_commits_response = pr_commits_response.json()
                         pr_commits_list = []
-                        print("PR commits:")
+                        # print("PR commits:")
                         # print(json.dumps(json.loads(pr_commits_response.text), sort_keys=True, indent=4, separators=(",", ": ")))
 
                         try:
@@ -444,7 +505,8 @@ class PullRequest:
 
                         for pr_commit_dict in pr_commits_list:
                             commit = Commit(self.workspace, project=self.project,
-                                             pr=self, pr_commit_dict=pr_commit_dict)
+                                            pr=self, pr_commit_dict=pr_commit_dict,
+                                            require_jira_issue_id_in_commit_message=require_jira_issue_id_in_commit_message)
                             self.pr_commits_list.append(commit)
                             # print(f"pr {pr.title}")
 
@@ -464,8 +526,9 @@ class PullRequest:
         except (IndexError, KeyError, TypeError) as e:
             print(f"Exception {e}")
 
+
 class Commit:
-    def __init__(self, workspace, project, pr, pr_commit_dict):
+    def __init__(self, workspace, project, pr, pr_commit_dict, require_jira_issue_id_in_commit_message=False):
         self.workspace = workspace
         self.project = project
         self.pr = pr
@@ -473,13 +536,36 @@ class Commit:
         self.date = None
         self.message = None
         self.hash = None
+        self.has_jira_id = False
+        self.jira_id = None
+        self.author = None
+        self.commit_list = workspace.commit_list
 
         try:
             self.date = pr_commit_dict["date"]
             self.message = pr_commit_dict["message"]
             self.hash = pr_commit_dict["hash"]
-            print(f"PR Commit {self.date} {self.message}")
+            self.author = pr_commit_dict["author"]["user"]["display_name"]
+            # print(f"PR Commit {self.date} {self.message}")
+            if require_jira_issue_id_in_commit_message:
+                jira_id = find_jira_id(self.message)
+                # print(f"find_jira_string {has_jira_id}")
+                if jira_id is not None:
+                    self.has_jira_id = True
+                    self.jira_id = jira_id
+            if self.commit_list is not None:
+                self.commit_list.add(self)
+
         except (IndexError, KeyError, TypeError) as e:
             print(f"Exception {e}")
             print(f"Commit: {self.pr_commit_dict}")
 
+    def to_dict(self):
+        return {"hash": self.hash,
+                "jira_id": self.jira_id,
+                "date": self.date,
+                "message": self.message,
+                "project": self.project.name,
+                "workspace": self.workspace.name,
+                "author": self.author
+                }
