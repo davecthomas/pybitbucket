@@ -110,14 +110,14 @@ class Bitbucket:
         self.access_token = self.oauth2.get_access_token()
         # Initialize the workspace and grab all projects therein
 
-        if "default_deploy_repo" in secret_config["atlassian"]:
-            self.default_deploy_repo = secret_config["atlassian"]["default_deploy_repo"]
+        if "default_deploy_repo_list" in secret_config["atlassian"]:
+            self.default_deploy_repo_list = secret_config["atlassian"]["default_deploy_repo_list"].split(",")
         else:
-            self.default_deploy_repo = None
-        if "default_project_key" in secret_config["atlassian"]:
-            self.default_project_key = secret_config["atlassian"]["default_project_key"]
+            self.default_deploy_repo_list = []
+        if "default_project_key_list" in secret_config["atlassian"]:
+            self.default_project_keys_list = secret_config["atlassian"]["default_project_key_list"].split(",")
         else:
-            self.default_project_key = None
+            self.default_project_keys_list = []
 
         if "get_prs_updated_since_utc" in secret_config["atlassian"]:
             self.get_prs_updated_since_utc = secret_config["atlassian"]["get_prs_updated_since_utc"]
@@ -134,8 +134,8 @@ class Bitbucket:
 
         self.settings_dict = {"version": self.version,
                               "workspace_id": self.workspace_id,
-                              "default_deploy_repo": self.default_deploy_repo,
-                              "default_project_key": self.default_project_key,
+                              "default_deploy_repo_list": self.default_deploy_repo_list,
+                              "default_project_keys_list": self.default_project_keys_list,
                               "get_prs_updated_since_utc": self.get_prs_updated_since_utc,
                               "get_prs_updated_since_datetime": self.get_prs_updated_since_datetime,
                               "require_jira_issue_id_in_commit_message": self.require_jira_issue_id_in_commit_message
@@ -144,20 +144,17 @@ class Bitbucket:
 
         self.workspace = self.get_workspace()
 
-        if self.default_project_key is not None:
-            print(f"Default project: {self.default_project_key} (getting PRs for all repos)")
-            project = self.workspace.get_project(self.default_project_key)
-            # Get the list of repos for the default project
-            repos_dict = project.get_repos()
-            # print(f"default project repos {repos_dict}")
-            for repo_name, repo in repos_dict.items():
-                if self.default_deploy_repo is not None and repo_name == self.default_deploy_repo:
-                    default_deploy_repo = True
-                else:
-                    default_deploy_repo = False
-                repo.get_pull_requests(default_deploy_repo=default_deploy_repo,
-                                       get_prs_updated_since_utc=self.get_prs_updated_since_utc,
-                                       require_jira_issue_id_in_commit_message=self.require_jira_issue_id_in_commit_message)
+        if len(self.default_project_keys_list) > 0:
+            for project_key in self.default_project_keys_list:
+                print(f"Default project: {project_key} (getting PRs for all repos)")
+                project = self.workspace.get_project(project_key)
+                # Get the list of repos for the default project
+                repos_dict = project.get_repos()
+                # print(f"default project repos {repos_dict}")
+                for repo_name, repo in repos_dict.items():
+                    repo.get_pull_requests(default_deploy_repo_list=self.default_deploy_repo_list,
+                                           get_prs_updated_since_utc=self.get_prs_updated_since_utc,
+                                           require_jira_issue_id_in_commit_message=self.require_jira_issue_id_in_commit_message)
         else:
             self.workspace.get_projects()
 
@@ -183,23 +180,29 @@ class Bitbucket:
             )
             if response:
                 if response.status_code == 200:
-                    workspace = Workspace(response.json(), self.access_token, self.default_project_key)
+                    workspace = Workspace(response.json(), self.access_token, self.default_project_keys_list,
+                                          self.default_deploy_repo_list)
 
             print(f"get workspace {workspace.name}")
             return workspace
 
+    def get_settings(self):
+        return self.settings_dict
+
 
 class Workspace:
-    def __init__(self, workspace_dict, access_token, default_project_key=None):
+    def __init__(self, workspace_dict, access_token, default_project_keys_list=[], default_deploy_repo_list=[]):
         self.commit_list_df = None
         self.access_token = access_token
-        self.default_project_key = default_project_key
+        self.default_project_keys_list = default_project_keys_list
         self.dict_urls = None
         self.slug = None
         self.name = None
         self.uuid = None
         self.projects_dict = {}
         self.commit_list = CommitList()
+        self.default_deploy_repo_list = default_deploy_repo_list
+        self.workspace_dict = workspace_dict
 
         try:
             self.dict_urls = workspace_dict["links"]
@@ -208,7 +211,8 @@ class Workspace:
             self.uuid = workspace_dict["uuid"]
 
         except (IndexError, KeyError, TypeError) as e:
-            print(e)
+            print(f"Exception {e}")
+            print(f"Repository: {self.workspace_dict}")
 
     def get_project(self, key):
         project = None
@@ -294,6 +298,7 @@ class Project:
             self.avatar_url = project_dict["links"]["avatar"]["href"]
         except (IndexError, KeyError, TypeError) as e:
             print(f"Exception {e}")
+            print(f"Project: {self.project_dict}")
 
         if self.repos_url is not None:
             repos_url = self.repos_url
@@ -365,8 +370,9 @@ class Repository:
             # print(f"Repository {self.name}")
         except (IndexError, KeyError, TypeError) as e:
             print(f"Exception {e}")
+            print(f"Repository: {self.repo_dict}")
 
-    def get_pull_requests(self, default_deploy_repo=False, get_prs_updated_since_utc=None,
+    def get_pull_requests(self, default_deploy_repo_list=[], get_prs_updated_since_utc=None,
                           require_jira_issue_id_in_commit_message=False, state="MERGED"):
         url_query_parameter = f"?state={state}&sort={self.query_param_pr_sort_str}"
         if get_prs_updated_since_utc is not None:
@@ -403,7 +409,7 @@ class Repository:
 
                 for pr_dict in pr_list:
                     pr = PullRequest(self.workspace, project=self.project,
-                                     repo=self, pr_dict=pr_dict, default_deploy_repo=default_deploy_repo,
+                                     repo=self, pr_dict=pr_dict, default_deploy_repo_list=default_deploy_repo_list,
                                      require_jira_issue_id_in_commit_message=require_jira_issue_id_in_commit_message)
                     self.pull_requests_list.append(pr)
                     # print(f"pr {pr.title}")
@@ -419,14 +425,15 @@ class Repository:
 
 
 class PullRequest:
-    def __init__(self, workspace, project, repo, pr_dict, default_deploy_repo=False,
+    def __init__(self, workspace, project, repo, pr_dict, default_deploy_repo_list=[],
                  require_jira_issue_id_in_commit_message=False):
+        # print(f"PullRequest{pr_dict}")
         self.query_param_pr_commits_sort_str = "-updated_on"  # sort PR commits by last updated first
         self.pr_dict = pr_dict
         self.workspace = workspace
         self.project = project
         self.repo = repo
-        self.default_deploy_repo = default_deploy_repo
+        self.default_deploy_repo_list = default_deploy_repo_list
         self.title = None
         self.id = None
         self.created_on_str = None
@@ -467,8 +474,6 @@ class PullRequest:
             self.author = pr_dict["author"]["display_name"]
             self.url = pr_dict["links"]["self"]["href"]
             self.links = pr_dict["links"]
-            # if default_deploy_repo:
-            #     print(f"default_deploy_repo: {self.title} : {self.description}")
 
             # Get the commits related to the pull request
             if "commits" in self.links:
@@ -525,6 +530,7 @@ class PullRequest:
 
         except (IndexError, KeyError, TypeError) as e:
             print(f"Exception {e}")
+            print(f"PullRequest: {self.pr_dict}")
 
 
 class Commit:
@@ -566,6 +572,9 @@ class Commit:
                 "date": self.date,
                 "message": self.message,
                 "project": self.project.name,
+                "repo": self.pr.repo.name,
                 "workspace": self.workspace.name,
-                "author": self.author
+                "author": self.author,
+                "pr_id": self.pr.id,
+                "is_deploy_repo": (self.pr.repo.name in self.workspace.default_deploy_repo_list)
                 }
