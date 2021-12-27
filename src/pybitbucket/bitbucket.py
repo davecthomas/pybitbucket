@@ -1,5 +1,7 @@
 import configparser
 import json
+import traceback
+
 from src.pybitbucket.jira import find_jira_id
 from datetime import datetime
 from urllib.parse import urlencode, quote_plus
@@ -85,10 +87,33 @@ class CommitList:
     def add(self, commit):
         self.commit_list.append(commit)
         self.commit_list_dict.append(commit.to_dict())
+        # print(f"CommitList {commit.message}")
 
     def to_dataframe(self):
         self.df = pd.DataFrame(self.commit_list_dict)
         return self.df
+
+
+class PullRequestList:
+    def __init__(self):
+        self.pr_list_dict = []  # This is a list of dictionaries of commits (for data framing)
+        self.pr_list = []  # This is a list of Commit objects
+        self.df = None
+
+    def add(self, commit):
+        self.pr_list.append(commit)
+        self.pr_list_dict.append(commit.to_dict())
+
+    def to_dataframe(self):
+        self.df = pd.DataFrame(self.pr_list_dict)
+        return self.df
+
+    def get_uniques_list(self):
+        if self.df is None:
+            df = self.to_dataframe()
+        else:
+            df = self.df
+        df['pr_id'].unique().tolist()
 
 
 class Bitbucket:
@@ -108,8 +133,15 @@ class Bitbucket:
         self.workspace_id = secret_config["atlassian"]["workspace_id"]
         self.oauth2 = BbOauth2(self.settings)
         self.access_token = self.oauth2.get_access_token()
+        self.prs_file = None
+        self.commits_file = None
+
         # Initialize the workspace and grab all projects therein
 
+        if "prs_file" in secret_config["general"]:
+            self.prs_file = secret_config["general"]["prs_file"]
+        if "commits_file" in secret_config["general"]:
+            self.prs_file = secret_config["general"]["commits_file"]
         if "default_deploy_repo_list" in secret_config["atlassian"]:
             self.default_deploy_repo_list = secret_config["atlassian"]["default_deploy_repo_list"].split(",")
         else:
@@ -158,7 +190,14 @@ class Bitbucket:
         else:
             self.workspace.get_projects()
 
-        print(f"Dataframe {self.workspace.commit_list.to_dataframe().to_csv()}")
+        # print(f"Dataframe {self.workspace.commit_list.to_dataframe().to_csv(self.commits_file)}")
+        # print(f"Dataframe {self.workspace.pr_list.to_dataframe().to_csv(self.commits_file)}")
+        self.df_commits = self.workspace.commit_list.to_dataframe()
+        # df_commits.to_csv(self.commits_file)
+        self.df_prs = self.workspace.pr_list.to_dataframe()
+        # df_prs.to_csv(self.prs_file)
+        df = pd.concat([self.df_prs, self.df_commits], ignore_index=True)
+        df.to_csv("df.csv")
 
     def get_workspace(self):
         workspace = None
@@ -193,6 +232,7 @@ class Bitbucket:
 class Workspace:
     def __init__(self, workspace_dict, access_token, default_project_keys_list=[], default_deploy_repo_list=[]):
         self.commit_list_df = None
+        self.pr_list_df = None
         self.access_token = access_token
         self.default_project_keys_list = default_project_keys_list
         self.dict_urls = None
@@ -201,6 +241,7 @@ class Workspace:
         self.uuid = None
         self.projects_dict = {}
         self.commit_list = CommitList()
+        self.pr_list = PullRequestList()
         self.default_deploy_repo_list = default_deploy_repo_list
         self.workspace_dict = workspace_dict
 
@@ -412,7 +453,8 @@ class Repository:
                                      repo=self, pr_dict=pr_dict, default_deploy_repo_list=default_deploy_repo_list,
                                      require_jira_issue_id_in_commit_message=require_jira_issue_id_in_commit_message)
                     self.pull_requests_list.append(pr)
-                    # print(f"pr {pr.title}")
+
+                    # print(f"pr {pr.to_dict()}")
 
                     # if pr.source_commit_url is not None:
                     #     print(f"commit: {pr.source_commit_url}")
@@ -452,85 +494,135 @@ class PullRequest:
         self.merge_commit = None
         self.merge_commit_url = None
         self.pr_commits_list = []
+        self.jira_id = None
+        self.pr_list = workspace.pr_list
+
+        # print(f"Pull Request dict {pr_dict}")
 
         try:
             if "title" in pr_dict:
                 self.title = pr_dict["title"]
-            self.id = pr_dict["id"]
-            self.created_on_str = pr_dict["created_on"]
+                if require_jira_issue_id_in_commit_message:
+                    jira_id = find_jira_id(self.title)
+                    if jira_id is not None:
+                        self.jira_id = jira_id
+            if "id" in pr_dict:
+                self.id = pr_dict["id"]
+            if "created_on" in pr_dict:
+                self.created_on_str = pr_dict["created_on"]
+                self.created_on_dt = datetime.fromisoformat(self.created_on_str)
             if "updated_on" in pr_dict:
                 self.updated_on = pr_dict["updated_on"]
+                self.updated_on_dt = datetime.fromisoformat(self.updated_on)
             if "description" in pr_dict:
                 self.description = pr_dict["description"]
-            self.created_on_dt = datetime.fromisoformat(self.created_on_str)
-            if "source" in pr_dict:
+
+            if "source" in pr_dict and "branch" in pr_dict["source"] and "name" in pr_dict["source"]["branch"]:
                 self.source_branch = pr_dict["source"]["branch"]["name"]
-                self.source_commit_hash = pr_dict["source"]["commit"]["hash"]
-                self.source_commit_url = pr_dict["source"]["commit"]["links"]["self"]["href"]
-            if "destination" in pr_dict:
+                if self.jira_id is None and require_jira_issue_id_in_commit_message and "-" in self.source_branch:
+                    jira_id_in_branch_list = self.source_branch.split("-")
+                    if len(jira_id_in_branch_list) > 1:
+                        jira_id_str_test = f"{jira_id_in_branch_list[0]}-{jira_id_in_branch_list[1]}"
+                        self.jira_id = find_jira_id(jira_id_str_test)
+                if "commit" in pr_dict["source"] and "links" in pr_dict["source"]["commit"]:
+                    self.source_commit_hash = pr_dict["source"]["commit"]["hash"]
+                    self.source_commit_url = pr_dict["source"]["commit"]["links"]["self"]["href"]
+            if "destination" in pr_dict and "branch" in pr_dict["destination"] and "name" in pr_dict["destination"]["branch"]:
                 self.destination_branch = pr_dict["destination"]["branch"]["name"]
-                self.destination_commit_hash = pr_dict["destination"]["commit"]["hash"]
-                self.destination_commit_url = pr_dict["destination"]["commit"]["links"]["self"]["href"]
-            self.author = pr_dict["author"]["display_name"]
-            self.url = pr_dict["links"]["self"]["href"]
-            self.links = pr_dict["links"]
+                if "commit" in pr_dict["destination"] and "links" in pr_dict["destination"]["commit"]:
+                    self.destination_commit_hash = pr_dict["destination"]["commit"]["hash"]
+                    self.destination_commit_url = pr_dict["destination"]["commit"]["links"]["self"]["href"]
+            if "author" in pr_dict and "display_name" in pr_dict["author"]:
+                self.author = pr_dict["author"]["display_name"]
 
-            # Get the commits related to the pull request
-            if "commits" in self.links:
-                self.commits_url = self.links["commits"]["href"]
-                self.list_commits = []
-                headers = {
-                    "Authorization": f"Bearer {self.workspace.access_token}"
-                }
+            if "links" in pr_dict:
+                self.links = pr_dict["links"]
+                if "self" in self.links and "href" in pr_dict["links"]["self"]:
+                    self.url = pr_dict["links"]["self"]["href"]
 
-                url = self.commits_url
-                url_query_parameter = f"?sort={self.query_param_pr_commits_sort_str}"
-                has_more_pages = True
-                pagenum = 0
-                while has_more_pages:
-                    pagenum = pagenum + 1
-                    # print(f"get PR commits page {pagenum} url={url}")
+                # Get the commits related to the pull request
+                if "commits" in self.links and "href" in self.links["commits"]:
+                    self.commits_url = self.links["commits"]["href"]
+                    self.list_commits = []
+                    headers = {
+                        "Authorization": f"Bearer {self.workspace.access_token}"
+                    }
 
-                    pr_commits_response = requests.request(
-                        "GET",
-                        url,
-                        headers=headers
-                    )
-                    if pr_commits_response and pr_commits_response.status_code == 200:
-                        pr_commits_response = pr_commits_response.json()
-                        pr_commits_list = []
-                        # print("PR commits:")
-                        # print(json.dumps(json.loads(pr_commits_response.text), sort_keys=True, indent=4, separators=(",", ": ")))
+                    url = self.commits_url
+                    has_more_pages = True
+                    pagenum = 0
+                    while has_more_pages:
+                        pagenum = pagenum + 1
+                        # print(f"get PR commits page {pagenum} url={url}")
 
-                        try:
-                            pr_commits_list = pr_commits_response["values"]
+                        pr_commits_response = requests.request(
+                            "GET",
+                            url,
+                            headers=headers
+                        )
+                        if pr_commits_response and pr_commits_response.status_code == 200:
+                            pr_commits_response = pr_commits_response.json()
+                            pr_commits_list = []
+                            # print(f"PR commits: {pr_commits_response}")
 
-                        except (IndexError, KeyError, TypeError):
-                            print(f"get_pr_commits has no values in returned json {pr_commits_response}")
+                            try:
+                                if "values" in pr_commits_response:
+                                    pr_commits_list = pr_commits_response["values"]
 
-                        for pr_commit_dict in pr_commits_list:
-                            commit = Commit(self.workspace, project=self.project,
-                                            pr=self, pr_commit_dict=pr_commit_dict,
-                                            require_jira_issue_id_in_commit_message=require_jira_issue_id_in_commit_message)
-                            self.pr_commits_list.append(commit)
-                            # print(f"pr {pr.title}")
+                            except (IndexError, KeyError, TypeError):
+                                print(f"get_pr_commits has no values in returned json {pr_commits_response}")
 
-                            # if pr.source_commit_url is not None:
-                            #     print(f"commit: {pr.source_commit_url}")
+                            for pr_commit_dict in pr_commits_list:
+                                # print(f"pr_commit_dict {pr_commit_dict}")
+                                commit = Commit(self.workspace, project=self.project,
+                                                pr=self, pr_commit_dict=pr_commit_dict,
+                                                require_jira_issue_id_in_commit_message=require_jira_issue_id_in_commit_message)
+                                self.pr_commits_list.append(commit)
+                                # print(f"commit {commit.message}")
 
-                        if "next" not in pr_commits_response:
-                            has_more_pages = False
-                        else:
-                            url = pr_commits_response["next"]
+                                # if pr.source_commit_url is not None:
+                                #     print(f"commit: {pr.source_commit_url}")
 
-            self.state = pr_dict["state"]
+                            if "next" not in pr_commits_response:
+                                has_more_pages = False
+                            else:
+                                url = pr_commits_response["next"]
+            if "state" in pr_dict:
+                self.state = pr_dict["state"]
             if "merge_commit" in pr_dict:
                 self.merge_commit = pr_dict["merge_commit"]
-                self.merge_commit_url = pr_dict["merge_commit"]["links"]["self"]["href"]
+                if "links" in pr_dict["merge_commit"] and "self" in pr_dict["merge_commit"]["links"] and \
+                        "href" in pr_dict["merge_commit"]["links"]["self"]:
+                    self.merge_commit_url = pr_dict["merge_commit"]["links"]["self"]["href"]
+
+            if self.pr_list is not None:
+                self.pr_list.add(self)
 
         except (IndexError, KeyError, TypeError) as e:
-            print(f"Exception {e}")
-            print(f"PullRequest: {self.pr_dict}")
+            print(f"Exception in PullRequest {e}")
+            print(traceback.format_exc())
+            print(f"PullRequest: {pr_dict}")
+            print(f"Merge Commit {self.merge_commit}")
+
+    def get_commits(self):
+        return self.pr_commits_list
+
+    def to_dict(self):
+        return {
+            "type": "PR",
+            "pr_id": self.id,
+            "message": self.title,  # renamed this from title so it matches with Commit.message in dataframe.concat
+            "created_datetime": self.created_on_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "updated_datetime": self.updated_on_dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "project": self.project.name,
+            "workspace": self.workspace.name,
+            "author": self.author,
+            "repo": self.repo.name,
+            "state": self.state,
+            "source_branch": self.source_branch,
+            "destination_branch": self.destination_branch,
+            "jira_id": self.jira_id
+        }
 
 
 class Commit:
@@ -548,8 +640,11 @@ class Commit:
         self.commit_list = workspace.commit_list
 
         try:
-            self.date = pr_commit_dict["date"]
+            self.date_utc = pr_commit_dict["date"]
+            self.datetime = datetime.strptime(
+                self.date_utc, '%Y-%m-%dT%H:%M:%S%z')
             self.message = pr_commit_dict["message"]
+            # print(f"Commit {self.message}")
             self.hash = pr_commit_dict["hash"]
             self.author = pr_commit_dict["author"]["user"]["display_name"]
             # print(f"PR Commit {self.date} {self.message}")
@@ -567,14 +662,17 @@ class Commit:
             print(f"Commit: {self.pr_commit_dict}")
 
     def to_dict(self):
-        return {"hash": self.hash,
+        return {"type": "Commit",
+                "hash": self.hash,
                 "jira_id": self.jira_id,
-                "date": self.date,
+                "created_datetime": self.datetime.strftime("%Y-%m-%d %H:%M:%S"),
                 "message": self.message,
                 "project": self.project.name,
                 "repo": self.pr.repo.name,
                 "workspace": self.workspace.name,
                 "author": self.author,
                 "pr_id": self.pr.id,
+                "source_branch": self.pr.source_branch,
+                "destination_branch": self.pr.destination_branch,
                 "is_deploy_repo": (self.pr.repo.name in self.workspace.default_deploy_repo_list)
                 }
